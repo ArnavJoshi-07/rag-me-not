@@ -1,0 +1,9 @@
+[project]
+name = "rag-me-not"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "alembic>=1.20.0",
+    "psycopg[binary]>=3.3.6",
+    "sqlalchemy>=2.1.1",
+]

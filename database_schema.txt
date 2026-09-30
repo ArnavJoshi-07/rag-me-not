@@ -1,0 +1,184 @@
+conventions: apply to every table below
+	-primary keys: uuid (join tables use their pair of FKs as the key)
+	-timestamps: timestamptz, named *_at -> created_at, updated_at, last_synced_at
+	-secrets: every column marked (encrypted) uses the same Fernet key from an env var, and is never returned by the API
+	-deletes: each FK says what happens on delete. data outside postgres is cleaned up in code -> OpenSearch chunks when a document / connector is deleted, MinIO objects when a chat session / chat file is deleted
+	-migrations: alembic creates and manages its own alembic_version table, nothing to define here
+
+chat_sessions: one row per conversation, shown in the chat sidebar
+	-chat_session_id / thread_id: uuid for the entire convo
+	-chat_title: condensed title from first user message
+	-agent_id: FK -> agents, chat is created with this agent (default for the next message), on delete set null
+	-user_id* :
+	-created_at:
+	-updated_at: time of the latest message, sorts the sidebar
+	note: deleting a session deletes its messages -> their agent_events + chat_files (cascade). the chat's MinIO files are deleted in code
+
+chat_messages : one row per message in a session
+	-message_id: uuid for the message
+	-chat_session_id: FK -> chat_sessions, on delete cascade
+	-agent_id: FK -> agents, agent chosen for this message (can change per message), on delete set null
+	-message: actual message
+	-message_type:  system, user, assistant
+	-parent_message_id: latest user input, FK -> chat_messages, on delete set null
+	-child_message_id: llm response to latest user input, FK -> chat_messages, on delete set null
+	-message_tokens: assistant -> thinking + generation tokens, user -> tokens of the user input, system -> tokens of the system prompt
+	-citations: stores citations used to generate response, only for assistant message_type
+	-status: streaming, complete, error -> assistant only, user / system messages are saved as complete
+	-error: why generation failed or stopped (provider error, timeout, user cancelled)
+	-created_at:
+	-updated_at:
+	-generation_time: time to generate response
+	-model_id: FK -> llm_models, model the request was sent to / answer generated from, on delete set null
+	-model_name: copy of llm_models.model_name when the message is saved, still shown after the model / provider is deleted
+	index: (chat_session_id, created_at) -> load a chat in order
+
+chat_files: files uploaded in a chat. bytes live in MinIO, this table holds the metadata
+	-chat_file_id: uuid for the file
+	-chat_session_id: FK -> chat_sessions, chat the file was uploaded in, on delete cascade
+	-message_id: FK -> chat_messages, the user message it was attached to, on delete cascade
+	-file_name: original file name
+	-mime_type:
+	-storage_path: MinIO object key -> chat-uploads/<chat_session_id>/<chat_file_id>
+	-size_bytes:
+	-created_at:
+
+agent_events: agent loop timeline, one row per step. shown in the chat timeline, never fed back to the LLM as history (README rule 8)
+	-event_id: uuid for the event
+	-message_id: FK -> chat_messages, the assistant message this step belongs to, on delete cascade
+	-round: agent loop round (1-5)
+	-seq: order of the event within the message
+	-event_type: analysis, tool_call, tool_result, reflection
+	-tool_name: rag.search / mcp.<server>.<tool> / sandbox.<action>, tool events only. plain text so the timeline survives a deleted tool
+	-call_id: links a tool_call to its tool_result
+	-status: ok, error -> tool_result only
+	-payload: json -> analysis output, tool args + reason, result content + citations, reflection text
+	-duration_ms: time taken by the step
+	-created_at:
+	index: (message_id, round, seq) -> load a timeline in order
+
+connectors: data sources. files are pulled with Elastic connectors' data-source classes called from celery. Elasticsearch is not used, so this table holds all connector state
+	-connector_id : uuid for connectors
+	-connector_name: name of connector
+	-connector_source: type of connector -> s3, gdrive, file. s3 / gdrive map to an Elastic data-source class, file = files uploaded from the admin page to MinIO, read by our own code
+	-config: json of non-secret settings in the shape the data-source class expects -> bucket name, folder id
+	-credentials : json of secrets only (encrypted), merged with config when the data-source class is built
+	-sync_cursor: json the data source returns after a sync, passed back next time for an incremental sync. null -> full sync (also for sources without incremental sync)
+	-status: active, paused, error
+	-refresh_interval_seconds: how often celery beat syncs the connector, null -> manual sync only
+	-last_synced_at: when the last successful sync finished
+	-created_at:
+	-updated_at: when the row was last edited
+
+documents: one row per file pulled by a connector. chunks live in OpenSearch, every chunk stores its document_id + connector_id
+	-document_id: uuid for the document
+	-connector_id: FK -> connectors, on delete cascade
+	-external_id: file's id in the source (s3 key, gdrive file id, MinIO key for file connectors)
+	-file_name: shown in citations
+	-url: link to the file in the source, shown in citations
+	-mime_type: picks the parser -> pdf, xlsx, pptx, txt, image
+	-size_bytes:
+	-source_version: change marker the source gives without downloading -> s3 ETag, gdrive modifiedTime
+	-content_hash: sha256 of the downloaded file bytes
+	-status: pending, indexed, failed
+	-error: parse / embed error if failed
+	-chunk_count: chunks written to OpenSearch
+	-last_seen_at: last sync that found this file in the source, used to detect files deleted at the source
+	-created_at:
+	-updated_at:
+	index: unique (connector_id, external_id) -> one row per file per connector
+
+sync_jobs: celery workers, one row per connector sync job
+	-sync_job_id: uuid for the job
+	-connector_id: FK -> connectors, on delete cascade
+	-celery_task_id: to check on / cancel the celery task
+	-trigger: scheduled (celery beat, from connectors.refresh_interval_seconds), manual (admin page)
+	-status: pending, running, success, failed, cancelled
+	-docs_found: files listed in the source
+	-docs_indexed: new or changed files that were parsed + embedded
+	-docs_skipped: unchanged files (same source_version or content_hash)
+	-docs_deleted: files gone from the source, removed from OpenSearch
+	-docs_failed: files that failed to parse / embed (reason in documents.error)
+	-error: why the job failed, if it did
+	-started_at:
+	-finished_at:
+	-created_at: when the job was queued
+	index: partial unique (connector_id) where status is pending / running -> beat and a manual trigger can't sync the same connector twice
+
+embedding_models:
+	-embedding_model_id: uuid for the embedding model
+	-model
+	-dims
+
+llm_providers:
+	-provider_id: uuid for providers
+	-provider_name: display name
+	-provider_type: LiteLLM provider type (anthropic/openai/google/ollama)
+	-api_key: (encrypted), empty for ollama / self-hosted models without auth
+	-api_base: custom endpoint url, needed for ollama / self-hosted models, empty for hosted providers
+	-is_enabled: models of a disabled provider are hidden from the model picker
+	-created_at:
+	-updated_at:
+
+llm_models: models offered by each provider, replaces the old models array on llm_providers
+	-model_id: uuid for the model
+	-provider_id: FK -> llm_providers, on delete cascade
+	-model_name: LiteLLM model string, e.g. ollama/llama3.1
+	-display_name: shown in the model picker
+	-context_window: max input tokens
+	-max_output_tokens:
+	-supports_tools: only models that can call tools are offered in the chat model picker
+	-supports_vision: needed for image / chart summaries during ingestion and image uploads in chat
+	-is_enabled:
+	-created_at:
+	-updated_at:
+	note: context_window, max_output_tokens and supports_* can be prefilled from litellm.get_model_info(model_name), admin can edit them (not every model, e.g. many ollama ones, is in LiteLLM's list)
+	index: unique (provider_id, model_name)
+
+mcp_servers: list of mcp servers, local (stdio process) or remote (http)
+	-mcp_server_id : uuid for mcp server
+	-mcp_server_name : unique slug, used in tool names (mcp.<server>.<tool>)
+	-transport: stdio, streamable_http, sse (sse only for older servers that don't support streamable_http)
+	-server_url: remote only (streamable_http / sse)
+	-headers: remote only, json of auth headers e.g. Authorization (encrypted)
+	-command: stdio only, executable to launch -> npx, uvx, docker
+	-args: stdio only, list of arguments
+	-env: stdio only, json of env vars for the process (encrypted, often holds api keys)
+	-is_enabled: tools of a disabled server are not offered to any agent
+	-tools_synced_at: last time tools/list was pulled into the tools table
+	-created_at:
+	-updated_at:
+
+tools: every tool an agent can be given. rag + sandbox rows are added by a migration, mcp rows are filled from each server's tools/list
+	-tool_id: uuid for the tool
+	-tool_type: rag, mcp, sandbox
+	-name: unique -> rag.search / mcp.<server>.<tool> / sandbox.<action>
+	-description: passed to the LLM
+	-input_schema: json schema, passed to LiteLLM as the tool definition
+	-parallel_safe: rag -> true, sandbox -> false, mcp -> from the tool's readOnlyHint annotation, admin can override
+	-mcp_server_id: FK -> mcp_servers, only for tool_type = mcp (null otherwise), on delete cascade
+	-is_enabled:
+	-created_at:
+	-updated_at:
+
+agents:
+	-agent_id: uuid for the agent
+	-name
+	-description:
+	-system_prompt:
+	-created_at:
+	-updated_at:
+
+agent_tools: tools an agent can call (many-to-many, one row per agent + tool)
+	-agent_id: FK -> agents, on delete cascade
+	-tool_id: FK -> tools, on delete cascade
+
+agent_connectors: connectors the agent's rag tool is allowed to search (many-to-many)
+	-agent_id: FK -> agents, on delete cascade
+	-connector_id: FK -> connectors, on delete cascade
+	note: rag.search loads these ids from the db and always adds them as a connector_id filter on the OpenSearch query. the LLM can pass connector_ids to narrow the search (intersected with these), never to widen it. rag is only offered to an agent that has rag.search in agent_tools and at least one row here.
+
+users*: user_id is in the future scope, update cols of diff tables accordingly later
+	-user_id: uuid for the user
+	-name
+	-pswd

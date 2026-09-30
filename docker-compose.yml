@@ -1,0 +1,66 @@
+name: rag-me-not
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: postgres:18.6-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      # builtin collation: sort order can't change under existing indexes when the image's glibc is upgraded
+      POSTGRES_INITDB_ARGS: --locale-provider=builtin --builtin-locale=C.UTF-8
+    volumes:
+      # Postgres 18+ images keep data in /var/lib/postgresql/18/docker, so the volume goes on the parent dir
+      - postgres-data:/var/lib/postgresql
+    ports:
+      # localhost only: a published port bypasses host firewalls like ufw
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    shm_size: 256mb
+    # SIGINT = fast shutdown. give it time to checkpoint before docker sends SIGKILL
+    stop_grace_period: 1m
+    healthcheck:
+      # over TCP on purpose: during first-time init the temporary server only listens on the unix socket
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+
+  # runs `alembic upgrade head` on every `docker compose up`, then exits. at head already -> does nothing.
+  # later services (api, workers) should wait on it with
+  # depends_on: { migrate: { condition: service_completed_successfully } }
+  migrate:
+    build: ./backend
+    image: rag-me-not-backend
+    # rebuild on every `up` so new files in backend/alembic/versions are picked up (cached, takes seconds)
+    pull_policy: build
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+
+volumes:
+  postgres-data:
