@@ -30,7 +30,7 @@ SERVICES = {
 MAX_TOKENS = 2048
 DIMS = 768
 CHUNK_PREFIX = "search_document: "
-# a 1500-token text takes a few seconds on 2 CPUs, and /health waits behind any batch already running
+# a 2048-token text takes a few seconds on 2 CPUs, and /health waits behind any batch already running
 TIMEOUT = 120
 
 

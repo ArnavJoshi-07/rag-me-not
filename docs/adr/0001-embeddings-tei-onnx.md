@@ -10,7 +10,7 @@ TEI gives us batching, health checks and metrics without any server code of ours
 | Onyx's encode path (sentence-transformers on CPU-only PyTorch) | 2.1 |
 | TEI's default candle engine | 1.0 |
 
-TEI on ONNX Runtime matched sentence-transformers' vectors exactly up to 1500 tokens. Onyx's server is built to load any model and to use a GPU when one is present. Its PyTorch install includes CUDA, so we would have had to rebuild it for CPU and then maintain it ourselves.
+TEI on ONNX Runtime matched sentence-transformers' vectors exactly (cosine distance about 1e-12) at every length up to the 2048-token cap. Onyx's server is built to load any model and to use a GPU when one is present. Its PyTorch install includes CUDA, so we would have had to rebuild it for CPU and then maintain it ourselves.
 
 We still follow Onyx's deployment pattern:
 - separate indexing and query instances from one image
