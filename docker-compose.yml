@@ -6,6 +6,37 @@ x-logging: &logging
     max-size: "10m"
     max-file: "5"
 
+# embeddings-indexing and embeddings-query: two TEI instances from one image (embeddings/Dockerfile). separate because
+# TEI runs one batch at a time from a FIFO queue, so on a shared instance a Query waits for the ingestion batch already
+# running. other services reach them at http://embeddings-indexing and http://embeddings-query (port 80), no auth
+x-embeddings: &embeddings
+  build: ./embeddings
+  image: rag-me-not-embeddings
+  # no pull_policy: build, unlike migrate. a rebuild with an empty build cache downloads the model again,
+  # so after editing embeddings/Dockerfile run `docker compose build embeddings-indexing`
+  restart: unless-stopped
+  environment: &embeddings-environment
+    # TEI reads its listen address from HOSTNAME, which docker sets to the container id. 1.9.4 only listens on
+    # 0.0.0.0 then because the id doesn't parse as an IP, so say it outright
+    HOSTNAME: 0.0.0.0
+  # nothing is written at runtime except OpenMP's /dev/shm/__KMP_REGISTERED_LIB_*, and /dev/shm stays writable
+  read_only: true
+  cap_drop:
+    - ALL
+  # SIGTERM: TEI stops taking requests and finishes the ones in flight
+  stop_grace_period: 1m
+  healthcheck:
+    # /health waits behind the batch that is running: up to 2.4 s at the worst case on 4 CPUs, longer on fewer
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1/health"]
+    interval: 10s
+    timeout: 30s
+    retries: 3
+    start_period: 30s
+    start_interval: 1s
+  security_opt:
+    - no-new-privileges:true
+  logging: *logging
+
 services:
   postgres:
     image: postgres:18.6-trixie
@@ -61,6 +92,49 @@ services:
     security_opt:
       - no-new-privileges:true
     logging: *logging
+
+  # embeds Chunks for ingestion
+  embeddings-indexing:
+    <<: *embeddings
+    environment:
+      <<: *embeddings-environment
+      # a Chunk over 2048 tokens is rejected with a 422, never truncated: ingestion splits it and retries
+      AUTO_TRUNCATE: "false"
+      # TEI sizes a batch as its inputs padded to the longest one, and memory grows with it. the default 16384 let
+      # 8 x 2000-token Chunks peak at 8.8 GiB. 4096 (at most 2 x 2048) peaked at 2.2 GiB and was no slower.
+      # 8 Chunks of up to 512 tokens still go in one batch
+      MAX_BATCH_TOKENS: 4096
+      # MKL, OpenMP and Rayon ignore the container's CPU limit (the image even sets RAYON_NUM_THREADS=8), and
+      # oversubscribed threads were 50% slower. ONNX Runtime's own pool already follows the limit
+      MKL_NUM_THREADS: ${EMBEDDINGS_INDEXING_CPUS:-4}
+      OMP_NUM_THREADS: ${EMBEDDINGS_INDEXING_CPUS:-4}
+      RAYON_NUM_THREADS: ${EMBEDDINGS_INDEXING_CPUS:-4}
+    cpus: ${EMBEDDINGS_INDEXING_CPUS:-4}
+    # ~1.25x the measured worst case, 2.2 GiB with 8 x 2000-token Chunks per request (8 x 512: 1.4 GiB).
+    # ONNX Runtime keeps the memory it grew to, so after a long batch it stays near that peak
+    mem_limit: ${EMBEDDINGS_INDEXING_MEMORY:-2.8g}
+    ports:
+      # localhost only, like postgres
+      - "127.0.0.1:${EMBEDDINGS_INDEXING_PORT:-8091}:80"
+
+  # embeds Queries for chat
+  embeddings-query:
+    <<: *embeddings
+    environment:
+      <<: *embeddings-environment
+      # a Query over 2048 tokens is cut to 2048 rather than failing the search
+      AUTO_TRUNCATE: "true"
+      # one 2048-token Query per batch, short Queries still batch 8 at a time. the default 16384 let 8 concurrent
+      # 2048-token Queries peak at 6.5 GiB, 2048 peaked at 1.4 GiB with the same latency
+      MAX_BATCH_TOKENS: 2048
+      MKL_NUM_THREADS: ${EMBEDDINGS_QUERY_CPUS:-2}
+      OMP_NUM_THREADS: ${EMBEDDINGS_QUERY_CPUS:-2}
+      RAYON_NUM_THREADS: ${EMBEDDINGS_QUERY_CPUS:-2}
+    cpus: ${EMBEDDINGS_QUERY_CPUS:-2}
+    # ~1.25x the measured worst case, 1.4 GiB with 8 concurrent 2048-token Queries
+    mem_limit: ${EMBEDDINGS_QUERY_MEMORY:-1.8g}
+    ports:
+      - "127.0.0.1:${EMBEDDINGS_QUERY_PORT:-8090}:80"
 
 volumes:
   postgres-data:

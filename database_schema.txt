@@ -109,6 +109,9 @@ embedding_models:
 	-embedding_model_id: uuid for the embedding model
 	-model
 	-dims
+	-query_prefix: Query prefix, put in front of a Query before embedding it, trailing space included -> 'search_query: ' for nomic-embed-text-v1. empty (default) -> the model needs none
+	-chunk_prefix: Chunk prefix, put in front of a Chunk before embedding it, trailing space included -> 'search_document: ' for nomic-embed-text-v1. empty (default) -> the model needs none
+	note: the embeddings service never adds a prefix, the caller (chat / ingestion) adds the one from this row. the chunker counts the Chunk prefix in a Chunk's tokens
 
 llm_providers:
 	-provider_id: uuid for providers

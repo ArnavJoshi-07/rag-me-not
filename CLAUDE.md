@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-rag-me-not is a self-hostable AI agent builder: documents, LLMs, MCP tools and a code sandbox are combined into agents you chat with, and answers that use documents are cited. It is in early development. The only code so far is the Postgres schema (Alembic migrations in `backend/alembic/versions/`) and its Docker setup. Everything else in `README.md` (agent loop, tool contract, ingestion pipeline, frontend) is the **target design**, not existing code. Read the README before building any of it. Its "Rules the loop follows" and "Standard tool-call format" sections are the spec.
+rag-me-not is a self-hostable AI agent builder: documents, LLMs, MCP tools and a code sandbox are combined into agents you chat with, and answers that use documents are cited. It is in early development. The only code so far is the Postgres schema (Alembic migrations in `backend/alembic/versions/`) with its Docker setup, and the embeddings service (`embeddings/`: Hugging Face TEI serving `nomic-embed-text-v1` on ONNX Runtime, CPU only, as two compose services; why: `docs/adr/0001-embeddings-tei-onnx.md`). Everything else in `README.md` (agent loop, tool contract, ingestion pipeline, frontend) is the **target design**, not existing code. Read the README before building any of it. Its "Rules the loop follows" and "Standard tool-call format" sections are the spec.
+
+`CONTEXT.md` is the glossary (Document, Chunk, Query, Chunk prefix, Query prefix). Use its terms in code, comments and docs. Decisions and their reasons are in `docs/adr/`.
 
 `database_schema.txt` is the human-written spec for every table: column meanings, on-delete behaviour, and what gets cleaned up outside Postgres (OpenSearch chunks, MinIO objects). A schema change goes in both the migration and this file.
 
@@ -20,14 +22,21 @@ uv run --env-file ../.env pytest          # all tests
 uv run --env-file ../.env pytest tests/test_migrations.py::test_upgrade_downgrade_round_trip
 ```
 
-Tests marked `db` need the compose Postgres running (`docker compose up -d postgres` from the repo root). Without it, or without `--env-file ../.env`, they are **skipped, not failed**, so check the skip summary. The migration round-trip test creates its own throwaway database and never touches the dev database.
+Tests marked `db` need the compose Postgres running (`docker compose up -d postgres` from the repo root), and without `--env-file ../.env` they can't find it. Tests marked `embeddings` need both embeddings services running (below). Either way, missing services make them **skipped, not failed**, so check the skip summary. The migration round-trip test creates its own throwaway database and never touches the dev database.
 
 Migrations:
 
 ```bash
-docker compose up                                                  # repo root: starts postgres, the `migrate` service runs `alembic upgrade head` and exits
+docker compose up                                                  # repo root: starts postgres and the embeddings services, the `migrate` service runs `alembic upgrade head` and exits
 uv run --env-file ../.env alembic -c alembic/alembic.ini current   # from backend/, against the local postgres
-uv run alembic -c alembic/alembic.ini revision -m "create foo" --rev-id 0017   # next number in sequence
+uv run alembic -c alembic/alembic.ini revision -m "create foo" --rev-id 0018   # next number in sequence
+```
+
+Embeddings services, from the repo root:
+
+```bash
+docker compose up -d embeddings-indexing embeddings-query   # healthy in ~5 s, ports 8091 / 8090 on 127.0.0.1
+docker compose build embeddings-indexing                    # after editing embeddings/Dockerfile. `up` only builds a missing image
 ```
 
 A PostToolUse hook (`.claude/hooks/ruff.sh`) runs `ruff format` and `ruff check --fix` on every Python file edited under `backend/`. Anything ruff can't fix comes back as hook feedback. Unused imports are reported but deliberately not removed, so an import can be added one edit before the code that uses it.
@@ -56,5 +65,7 @@ These come from the README and schema spec, and are easy to miss:
 - **Citations** are numbered by the executor and unique across rounds, never by individual tools.
 - **History:** later turns see only user messages and final answers. `agent_events` (tool calls, thinking) are for the UI timeline only.
 - **RAG scope:** searches only cover the agent's `agent_connectors`. Query analysis may narrow that set but never widen it.
-- **Embeddings** (`nomic-embed-text-v1`) need the prefix `search_document: ` when indexing and `search_query: ` when querying.
+- **Embeddings:** ingestion calls `http://embeddings-indexing`, chat calls `http://embeddings-query`, both at `POST /v1/embeddings` (OpenAI format). Both always return normalized 768-dim vectors. Ingestion and chat never share a TEI instance: TEI runs one batch at a time from a FIFO queue, so on a shared instance Query p95 was 2.6 s, against 39 ms on a separate query instance. The caller adds the Query prefix or Chunk prefix from the model's `embedding_models` row (`query_prefix`, `chunk_prefix`). The service never adds one.
+- **Chunk cap:** 2048 tokens, counted with the model's tokenizer and including the Chunk prefix and the 2 special tokens. Over the cap, indexing returns a 422 with `` `inputs` must have less than 2048 tokens. Given: N `` (2048 itself is accepted). Ingestion then splits the Chunk into neighbour Chunks and retries. Chunks are never truncated. One over-cap Chunk fails the whole request, and the error doesn't say which Chunk it was. Ingestion sends at most 8 Chunks per request, because ONNX Runtime forces `MAX_BATCH_REQUESTS=8`. A request of 8 Chunks of ~2000 tokens took up to 34 s under load, so give the client a timeout well above that. `embeddings-query` truncates to 2048 instead.
+- **Embeddings memory:** `MAX_BATCH_TOKENS` (4096 on indexing, 2048 on query) bounds memory. TEI pads a batch to its longest input, and the default of 16384 peaked at 8.8 GiB. The `mem_limit` defaults are sized from measurements at those values, so re-measure both if either changes.
 - **Secrets:** columns marked encrypted in `database_schema.txt` share one Fernet key from an env var and are never returned by the API.

@@ -39,4 +39,7 @@ known-third-party = ["alembic"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["--strict-markers"]
-markers = ["db: needs the compose Postgres running (skipped when it isn't reachable)"]
+markers = [
+    "db: needs the compose Postgres running (skipped when it isn't reachable)",
+    "embeddings: needs the compose embeddings-indexing and embeddings-query services running (skipped when they aren't reachable)",
+]
