@@ -7,3 +7,36 @@ dependencies = [
     "psycopg[binary]>=3.3.6",
     "sqlalchemy>=2.1.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # isort
+    "B",       # bugbear
+    "UP",      # pyupgrade
+    "SIM",     # simplify
+    "C4",      # comprehensions
+    "ASYNC",   # blocking calls inside async code (agent loop, tool executor)
+    "PT",      # pytest style
+    "RUF",
+]
+
+[tool.ruff.lint.isort]
+# the local alembic/ migrations dir would otherwise make ruff file `from alembic import op` as first-party
+known-third-party = ["alembic"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers"]
+markers = ["db: needs the compose Postgres running (skipped when it isn't reachable)"]
