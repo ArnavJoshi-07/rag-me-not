@@ -38,9 +38,10 @@ RUN mkdir -p 1_Pooling \
       "f2fa6333d3899e2f9368e2e2741ece8e74160337b3698f475f6e0f7f28e396fe  1_Pooling/config.json" \
     | sha256sum -c --strict -
 
-# config.json: TEI's ONNX loader reads hidden_size, num_hidden_layers and num_attention_heads, and also accepts
-# n_embd, n_layer and n_head as other names for the same fields. this config has both spellings, so loading fails with
-# "duplicate field `hidden_size`". the long names go, the n_* ones hold the same values (768, 12, 12).
+# config.json: TEI's ONNX loader reads hidden_size and num_hidden_layers, and also accepts n_embd and n_layer as other
+# names for the same fields. the model's "v5 Transformers" revision added the long names next to the n_* ones, so
+# loading fails with "duplicate field `hidden_size`". the long names go, the n_* ones hold the same values (768, 12).
+# num_attention_heads stays: the loader never reads it (its n_head alias is for num_key_value_heads).
 # don't drop this patch, and re-check it whenever TEI or the model revision changes.
 # why: docs/adr/0001-embeddings-tei-onnx.md
 #
@@ -50,11 +51,10 @@ RUN mkdir -p 1_Pooling \
 #
 # the second sha256 check proves sed changed exactly those lines and nothing else
 RUN sed -i -e '/^  "hidden_size": 768,$/d' \
-           -e '/^  "num_hidden_layers": 12,$/d' \
-           -e '/^  "num_attention_heads": 12,$/d' config.json \
+           -e '/^  "num_hidden_layers": 12,$/d' config.json \
  && sed -i 's/^  "max_seq_length": 8192,$/  "max_seq_length": 2048,/' sentence_bert_config.json \
  && printf '%s\n' \
-      "8c4c1cac330c1066fa8cd5214c15b12a5ec84337d0a80394d3cefded190841a4  config.json" \
+      "7e18cbb3cbe5cdc4bf5083ebceed04377e30bd4d25d490a4714ca64932b8a06b  config.json" \
       "d7ff3be36cdd7a6eeb94411121036d669cb1074eb1540dabd3e3cb18ee13e3a6  sentence_bert_config.json" \
     | sha256sum -c --strict -
 
