@@ -25,8 +25,8 @@ QUERY_PREFIX = "search_query: "
 CHUNK_PREFIX = "search_document: "
 OUT = Path(__file__).with_name("nomic_reference_vectors.json")
 
-# a long Chunk, well under the 2048-token cap but far past the short inputs most parity checks use
-LONG_CHUNK_TOKENS = 1500
+# a Chunk right at the 2048-token cap, the longest one ingestion sends
+LONG_CHUNK_TOKENS = 2048
 
 HANDBOOK = [
     "Every connector syncs on its own schedule. When a sync starts, the worker lists the files in the source and "
@@ -46,13 +46,20 @@ HANDBOOK = [
 
 
 def long_chunk(model: SentenceTransformer) -> str:
-    """Handbook sections, numbered and repeated, until the text reaches LONG_CHUNK_TOKENS (special tokens included)."""
+    """Handbook sections, numbered and repeated, cut to exactly LONG_CHUNK_TOKENS tokens (special tokens included)."""
     sections: list[str] = []
     i = 0
     while len(model.tokenizer(CHUNK_PREFIX + "\n\n".join(sections))["input_ids"]) < LONG_CHUNK_TOKENS:
         sections.append(f"Section {i + 1}. {HANDBOOK[i % len(HANDBOOK)]}")
         i += 1
-    return "\n\n".join(sections)
+    # the last section overshoots the cap: cut the text where the last token that fits ends.
+    # token 0 is [CLS], so token LONG_CHUNK_TOKENS - 2 is the last one before [SEP]
+    text = CHUNK_PREFIX + "\n\n".join(sections)
+    end = model.tokenizer(text, return_offsets_mapping=True)["offset_mapping"][LONG_CHUNK_TOKENS - 2][1]
+    chunk = text[len(CHUNK_PREFIX) : end]
+    tokens = len(model.tokenizer(CHUNK_PREFIX + chunk)["input_ids"])
+    assert tokens == LONG_CHUNK_TOKENS, f"the cut split a word and it re-tokenized to {tokens} tokens, move the cut"
+    return chunk
 
 
 def main() -> None:

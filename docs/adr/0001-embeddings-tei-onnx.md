@@ -10,7 +10,7 @@ TEI gives us batching, health checks and metrics without any server code of ours
 | Onyx's encode path (sentence-transformers on CPU-only PyTorch) | 2.1 |
 | TEI's default candle engine | 1.0 |
 
-TEI on ONNX Runtime matched sentence-transformers' vectors exactly up to 1500 tokens. Onyx's server is built to load any model and to use a GPU when one is present. Its PyTorch install includes CUDA, so we would have had to rebuild it for CPU and then maintain it ourselves.
+TEI on ONNX Runtime matched sentence-transformers' vectors exactly (cosine distance about 1e-12) at every length up to the 2048-token cap. Onyx's server is built to load any model and to use a GPU when one is present. Its PyTorch install includes CUDA, so we would have had to rebuild it for CPU and then maintain it ourselves.
 
 We still follow Onyx's deployment pattern:
 - separate indexing and query instances from one image
@@ -21,5 +21,5 @@ We still follow Onyx's deployment pattern:
 ## Consequences
 
 - **Ingestion and chat must never share a TEI instance.** TEI runs one batch at a time from a FIFO queue, so a Query waits for the whole batch already running. On one shared instance during ingestion, Query p95 was 2.6 s. Onyx's server encodes concurrently and got 51 ms in the same test. With a separate query instance at 2 CPUs, TEI's Query p95 was 39 ms, and ingestion speed didn't change. The cost is the extra CPUs and memory of a second process.
-- **The image deletes three fields from the model's `config.json`.** The fields are `hidden_size`, `num_hidden_layers` and `num_attention_heads`, and they clash with the model's `n_embd`-style aliases. Without this change TEI's ONNX engine refuses to load the model. Don't "fix" it back. Re-check it whenever TEI or the model revision is upgraded. The `embeddings` parity test fails if vectors drift.
+- **The image deletes two fields from the model's `config.json`.** The fields are `hidden_size` and `num_hidden_layers`. The model's "v5 Transformers" revision, the one we pin, added them next to `n_embd` and `n_layer`, which TEI reads as other names for the same fields. With both spellings present, TEI's ONNX engine refuses to load the model (`duplicate field hidden_size`). Don't "fix" it back. Re-check it whenever TEI or the model revision is upgraded, because the clash depends on how that TEI version names these fields. The `embeddings` parity test fails if vectors drift.
 - **TEI and the model revision are both pinned.** TEI is pinned by digest and the model by commit SHA. Any change to either can change the vectors, so test it with the parity test before deploying. Vectors that already exist in OpenSearch were produced by the old pair.
